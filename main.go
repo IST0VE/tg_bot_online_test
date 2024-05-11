@@ -4,12 +4,18 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-
 	"github.com/joho/godotenv"
 )
+
+var (
+	lastKnownStatus = false
+)
+
+var lastCheck time.Time
 
 func main() {
 	if err := godotenv.Load(); err != nil {
@@ -35,33 +41,46 @@ func main() {
 	updates := bot.GetUpdatesChan(u)
 
 	for update := range updates {
-		if update.Message == nil {
-			continue
+		if update.Message != nil { // Добавляем проверку на nil
+			if update.Message.IsCommand() {
+				handleCommands(bot, update)
+			}
 		}
 
-		if update.Message.IsCommand() {
-			handleCommands(bot, update)
+		if update.MyChatMember != nil {
+			handleMyChatMember(bot, update)
+		}
+
+		currentTime := time.Now()
+		if currentTime.Sub(lastCheck) > time.Minute*1 {
+			checkAndNotifyChannelPresence(bot)
+			lastCheck = currentTime
 		}
 	}
+
 }
 
 func handleCommands(bot *tgbotapi.BotAPI, update tgbotapi.Update) {
 	msg := tgbotapi.NewMessage(update.Message.Chat.ID, "")
 	switch update.Message.Command() {
-	case "save":
-		if isUserAdmin(bot, update.Message) {
-
-			err := saveMessage(update.Message)
-			if err != nil {
-				msg.Text = "Ошибка в сохранении сообщения."
-			} else {
-				msg.Text = "Сообщение успешно сохранено."
-			}
-		} else {
-			msg.Text = "Вы должны быть администратором, чтобы выполнить это действие."
-		}
 	case "status":
 		msg.Text = fmt.Sprintf("Бот онлайн. Последняя проверка в %s", time.Now().Format(time.RFC1123))
+	case "check":
+		args := update.Message.CommandArguments()
+		if args == "" {
+			msg.Text = "Пожалуйста, укажите ID канала после команды, например: /check -1001234567890"
+		} else {
+			chatID, err := strconv.ParseInt(args, 10, 64)
+			if err != nil {
+				msg.Text = "Неправильный формат ID канала."
+			} else {
+				if isBotInChannel(bot, chatID) {
+					msg.Text = "Бот находится в этом канале/группе."
+				} else {
+					msg.Text = "Бот не состоит в этом канале/группе или не может получить сообщения."
+				}
+			}
+		}
 	default:
 		msg.Text = "Я не знаю эту команду."
 	}
@@ -71,36 +90,62 @@ func handleCommands(bot *tgbotapi.BotAPI, update tgbotapi.Update) {
 	}
 }
 
-func isUserAdmin(bot *tgbotapi.BotAPI, message *tgbotapi.Message) bool {
-	chatMemberConfig := tgbotapi.GetChatMemberConfig{
-		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
-			ChatID: message.Chat.ID,
-			UserID: message.From.ID,
+func isBotInChannel(bot *tgbotapi.BotAPI, chatID int64) bool {
+	chatInfoConfig := tgbotapi.ChatInfoConfig{
+		ChatConfig: tgbotapi.ChatConfig{
+			ChatID: chatID,
 		},
 	}
 
-	chatMember, err := bot.GetChatMember(chatMemberConfig)
+	_, err := bot.GetChat(chatInfoConfig)
 	if err != nil {
 		log.Print(err)
 		return false
 	}
-
-	return chatMember.Status == "administrator" || chatMember.Status == "creator"
+	return true
 }
 
-func saveMessage(message *tgbotapi.Message) error {
-	// Save the message to a text file
-	fileName := fmt.Sprintf("messages_%d.txt", message.Chat.ID)
-	file, err := os.OpenFile(fileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+func checkAndNotifyChannelPresence(bot *tgbotapi.BotAPI) {
+	chatID, err := strconv.ParseInt(os.Getenv("TARGET_CHAT_ID"), 10, 64)
 	if err != nil {
-		return err
+		log.Printf("Ошибка при разборе TARGET_CHAT_ID: %v", err)
+		return
 	}
-	defer file.Close()
 
-	if _, err = file.WriteString(fmt.Sprintf("%s: %s\n", message.From.UserName, message.Text)); err != nil {
-		return err
+	isPresent := isBotInChannel(bot, chatID)
+	if isPresent != lastKnownStatus {
+		lastKnownStatus = isPresent
+		notifyUser(bot, isPresent)
 	}
-	return nil
 }
 
-// функция для проверки бот в группе или нет, необходимо попросить бота взять из группы последнее сообщение, если он не сможет прочитать сообщеине, то он оффлайн
+func notifyUser(bot *tgbotapi.BotAPI, isPresent bool) {
+	userID, err := strconv.ParseInt(os.Getenv("NOTIFICATION_USER_ID"), 10, 64)
+	if err != nil {
+		log.Printf("Ошибка при разборе NOTIFICATION_USER_ID: %v", err)
+		return
+	}
+
+	msgText := ""
+	if isPresent {
+		msgText = "Бот добавлен в канал."
+	} else {
+		msgText = "Бот удален из канала."
+	}
+
+	msg := tgbotapi.NewMessage(userID, msgText)
+	if _, err := bot.Send(msg); err != nil {
+		log.Printf("Ошибка при отправке уведомления пользователю: %v", err)
+	}
+}
+
+func handleMyChatMember(bot *tgbotapi.BotAPI, update tgbotapi.Update) {
+	if update.MyChatMember.NewChatMember.User.ID == bot.Self.ID {
+		msgText := fmt.Sprintf("Статус бота изменён на: %s", update.MyChatMember.NewChatMember.Status)
+		log.Println(msgText)
+
+		if update.MyChatMember.NewChatMember.Status == "kicked" || update.MyChatMember.NewChatMember.Status == "left" {
+			notifyUser(bot, false)
+		}
+	}
+}
