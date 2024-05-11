@@ -41,7 +41,7 @@ func main() {
 	updates := bot.GetUpdatesChan(u)
 
 	for update := range updates {
-		if update.Message != nil { // Добавляем проверку на nil
+		if update.Message != nil {
 			if update.Message.IsCommand() {
 				handleCommands(bot, update)
 			}
@@ -52,7 +52,7 @@ func main() {
 		}
 
 		currentTime := time.Now()
-		if currentTime.Sub(lastCheck) > time.Minute*1 {
+		if currentTime.Sub(lastCheck) > time.Minute*10 {
 			checkAndNotifyChannelPresence(bot)
 			lastCheck = currentTime
 		}
